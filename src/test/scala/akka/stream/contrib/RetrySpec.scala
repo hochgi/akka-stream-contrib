@@ -12,7 +12,7 @@ class RetrySpecAutoFusingOff extends { val autoFusing = false } with RetrySpec
 
 trait RetrySpec extends BaseStreamSpec {
 
-  val failedElem: Try[Int] = Failure(new Exception)
+  val failedElem: Try[Int] = Failure(new Exception("cooked failure"))
 
   lazy val flow = Flow.fromGraph(GraphDSL.create() { implicit b =>
 
@@ -28,7 +28,7 @@ trait RetrySpec extends BaseStreamSpec {
   })
 
   "Retry" should {
-    "retry ints according to their parity" ignore {
+    "retry ints according to their parity" in {
 
       val (source, sink) = TestSource.probe[Int]
         .map(i => (i, i))
