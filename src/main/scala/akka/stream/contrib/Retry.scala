@@ -27,7 +27,7 @@ object Retry {
    * @return `Graph[FlowShape[(I,S),Try[O]],M]` instance
    */
   def apply[I, O, S, M](flow: Graph[FlowShape[(I, S), (Try[O], S)], M])(retryWith: S => Option[(I, S)]): Graph[FlowShape[(I, S), Try[O]], M] = {
-    GraphDSL.create(flow) { implicit b => origFlw =>
+    GraphDSL.create(flow) { implicit b => origFlow =>
       import GraphDSL.Implicits._
 
       val elemCount = b.add(new CountElementsAndInterceptCompletion[(I, S)])
@@ -37,12 +37,12 @@ object Retry {
         case (failedTry, s)           => retryWith(s).fold[Either[Try[O], (I, S)]](Left(failedTry))(Right.apply)
       })
       val coElemCount = b.add(new InterceptElemntsLeavingCycle[Try[O]])
-
-      elemCount.out ~> mergePref ~> origFlw ~> partition.in
-      partition.out0 ~> coElemCount.in
-      mergePref.preferred <~ partition.out1
-      elemCount.in1 <~ coElemCount.out1
-
+      // format: OFF
+      elemCount.out ~> mergePref ~> origFlow ~> partition.in
+                                                partition.out0 ~> coElemCount.in
+                       mergePref.preferred  <~  partition.out1
+      elemCount.in1                         <~                    coElemCount.out1
+      // format: ON
       FlowShape(elemCount.in0, coElemCount.out0)
     }
   }
@@ -101,6 +101,8 @@ object Retry {
 
       import shape._
       var elementsInCycleCount = 0
+
+      override def preStart() = pull(in1)
 
       setHandler(in0, new InHandler {
         override def onPush() = {
