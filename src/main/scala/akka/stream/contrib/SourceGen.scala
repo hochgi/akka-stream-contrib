@@ -29,20 +29,22 @@ object SourceGen {
 
           import shape._
 
-          var pending: (S, E) = seed -> null.asInstanceOf[E]
+          var pending: S = seed
           var pushedToCycle = false
 
           setHandler(in, new InHandler {
             override def onPush() = {
-              pending = grab(in)
-              push(out1, pending._2)
+              val (s, e) = grab(in)
+              pending = s
+              push(out1, e)
               pushedToCycle = false
             }
           })
 
           setHandler(out0, new OutHandler {
-            override def onPull() = if (!pushedToCycle) {
-              push(out0, pending._1)
+            override def onPull() = if (!pushedToCycle && isAvailable(out1)) {
+              push(out0, pending)
+              pending = null.asInstanceOf[S]
               pushedToCycle = true
             }
           })
@@ -51,7 +53,8 @@ object SourceGen {
             override def onPull() = {
               pull(in)
               if (!pushedToCycle && isAvailable(out0)) {
-                push(out0, pending._1)
+                push(out0, pending)
+                pending = null.asInstanceOf[S]
                 pushedToCycle = true
               }
             }
@@ -81,7 +84,7 @@ object SourceGen {
    * value of type `O`, that when fed to the unfolding function,
    * generates a pair of the next state `S` and output elements of type `E`.
    */
-  def unfoldFlowWith[E, S, O, M](seed: S, flow: Graph[FlowShape[S, O], M])(unfoldWith: O => Option[(E, S)]): Source[E, M] = {
+  def unfoldFlowWith[E, S, O, M](seed: S, flow: Graph[FlowShape[S, O], M])(unfoldWith: O => Option[(S, E)]): Source[E, M] = {
 
     val fanOut2Shape = new GraphStage[FanOutShape2[O, S, E]] {
 
@@ -92,47 +95,38 @@ object SourceGen {
 
           import shape._
 
-          var ePending: E = null.asInstanceOf[E]
-          var iPending: S = seed
-
-          override def preStart() = pull(in)
+          var pending: S = seed
+          var pushedToCycle = false
 
           setHandler(in, new InHandler {
             override def onPush() = {
               val o = grab(in)
               unfoldWith(o) match {
                 case None => completeStage()
-                case Some((e, i)) => {
-                  pull(in)
-                  if (isAvailable(out0)) {
-                    push(out0, i)
-                    iPending = null.asInstanceOf[S]
-                  } else iPending = i
-                  if (isAvailable(out1)) push(out1, e)
-                  else ePending = e
+                case Some((s, e)) => {
+                  pending = s
+                  push(out1, e)
+                  pushedToCycle = false
                 }
               }
             }
           })
 
           setHandler(out0, new OutHandler {
-            override def onPull() = {
-              if (iPending != null) {
-                push(out0, iPending)
-                iPending = null.asInstanceOf[S]
-              }
+            override def onPull() = if (!pushedToCycle && isAvailable(out1)) {
+              push(out0, pending)
+              pending = null.asInstanceOf[S]
+              pushedToCycle = true
             }
           })
 
           setHandler(out1, new OutHandler {
             override def onPull() = {
-              if (ePending != null) {
-                push(out1, ePending)
-                ePending = null.asInstanceOf[E]
-              }
-              if (isAvailable(out0) && iPending != null) {
-                push(out0, iPending)
-                iPending = null.asInstanceOf[S]
+              pull(in)
+              if (!pushedToCycle && isAvailable(out0)) {
+                push(out0, pending)
+                pending = null.asInstanceOf[S]
+                pushedToCycle = true
               }
             }
           })
