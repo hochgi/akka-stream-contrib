@@ -20,62 +20,17 @@ object SourceGen {
    */
   def unfoldFlow[S, E, M](seed: S)(flow: Graph[FlowShape[S, (S, E)], M]): Source[E, M] = {
 
-    val fanOut2Shape = new GraphStage[FanOutShape2[(S, E), S, E]] {
-
-      override val shape = new FanOutShape2[(S, E), S, E]("unfoldFlow")
-      override def createLogic(attributes: Attributes) = {
-
-        new GraphStageLogic(shape) {
-
-          import shape._
-
-          var pending: S = seed
-          var pushedToCycle = false
-
-          setHandler(in, new InHandler {
-            override def onPush() = {
-              val (s, e) = grab(in)
-              pending = s
-              push(out1, e)
-              pushedToCycle = false
-            }
-          })
-
-          setHandler(out0, new OutHandler {
-            override def onPull() = if (!pushedToCycle && isAvailable(out1)) {
-              push(out0, pending)
-              pending = null.asInstanceOf[S]
-              pushedToCycle = true
-            }
-          })
-
-          setHandler(out1, new OutHandler {
-            override def onPull() = {
-              pull(in)
-              if (!pushedToCycle && isAvailable(out0)) {
-                push(out0, pending)
-                pending = null.asInstanceOf[S]
-                pushedToCycle = true
-              }
-            }
-          })
-        }
-      }
-    }
-
-    Source.fromGraph(GraphDSL.create(flow) {
-      implicit b =>
-        {
-          f =>
-            {
-              import GraphDSL.Implicits._
-
-              val fo2 = b.add(fanOut2Shape)
-              fo2.out0 ~> f ~> fo2.in
-              SourceShape(fo2.out1)
-            }
+    val fanOut2Stage = fanOut2unfoldingStage[(S, E), S, E](seed, {
+      (handleStateElement, grabIn, completeStage) =>
+        new InHandler {
+          override def onPush() = {
+            val (s, e) = grabIn()
+            handleStateElement(s, e)
+          }
         }
     })
+
+    unfoldFlowGraph(fanOut2Stage, flow)
   }
 
   /**
@@ -86,66 +41,80 @@ object SourceGen {
    */
   def unfoldFlowWith[E, S, O, M](seed: S, flow: Graph[FlowShape[S, O], M])(unfoldWith: O => Option[(S, E)]): Source[E, M] = {
 
-    val fanOut2Shape = new GraphStage[FanOutShape2[O, S, E]] {
-
-      override val shape = new FanOutShape2[O, S, E]("unfoldFlowWith")
-      override def createLogic(attributes: Attributes) = {
-
-        new GraphStageLogic(shape) {
-
-          import shape._
-
-          var pending: S = seed
-          var pushedToCycle = false
-
-          setHandler(in, new InHandler {
-            override def onPush() = {
-              val o = grab(in)
-              unfoldWith(o) match {
-                case None => completeStage()
-                case Some((s, e)) => {
-                  pending = s
-                  push(out1, e)
-                  pushedToCycle = false
-                }
-              }
+    val fanOut2Stage = fanOut2unfoldingStage[O, S, E](seed, {
+      (handleStateElement, grabIn, completeStage) =>
+        new InHandler {
+          override def onPush() = {
+            val o = grabIn()
+            unfoldWith(o) match {
+              case None         => completeStage()
+              case Some((s, e)) => handleStateElement(s, e)
             }
-          })
+          }
+        }
+    })
 
-          setHandler(out0, new OutHandler {
-            override def onPull() = if (!pushedToCycle && isAvailable(out1)) {
+    unfoldFlowGraph(fanOut2Stage, flow)
+  }
+
+  private[akka] def unfoldFlowGraph[E, S, O, M](
+    fanOut2Stage: GraphStage[FanOutShape2[O, S, E]],
+    flow:         Graph[FlowShape[S, O], M]
+  ): Source[E, M] = Source.fromGraph(GraphDSL.create(flow) {
+    implicit b =>
+      {
+        f =>
+          {
+            import GraphDSL.Implicits._
+
+            val fo2 = b.add(fanOut2Stage)
+            fo2.out0 ~> f ~> fo2.in
+            SourceShape(fo2.out1)
+          }
+      }
+  })
+
+  private[akka] def fanOut2unfoldingStage[O, S, E](seed: S, withInHandler: ((S, E) => Unit, () => O, () => Unit) => InHandler) = new GraphStage[FanOutShape2[O, S, E]] {
+
+    override val shape = new FanOutShape2[O, S, E]("unfoldFlow")
+    override def createLogic(attributes: Attributes) = {
+
+      new GraphStageLogic(shape) {
+
+        import shape._
+
+        var pending: S = seed
+        var pushedToCycle = false
+
+        setHandler(in, withInHandler((s, e) => {
+          pending = s
+          push(out1, e)
+          pushedToCycle = false
+        }, () => grab(in), completeStage))
+
+        setHandler(out0, new OutHandler {
+          override def onPull() = if (!pushedToCycle && isAvailable(out1)) {
+            push(out0, pending)
+            pending = null.asInstanceOf[S]
+            pushedToCycle = true
+          }
+
+          override def onDownstreamFinish() = {
+            //Do Nothing, intercept completion as downstream
+          }
+        })
+
+        setHandler(out1, new OutHandler {
+          override def onPull() = {
+            pull(in)
+            if (!pushedToCycle && isAvailable(out0)) {
               push(out0, pending)
               pending = null.asInstanceOf[S]
               pushedToCycle = true
             }
-          })
-
-          setHandler(out1, new OutHandler {
-            override def onPull() = {
-              pull(in)
-              if (!pushedToCycle && isAvailable(out0)) {
-                push(out0, pending)
-                pending = null.asInstanceOf[S]
-                pushedToCycle = true
-              }
-            }
-          })
-        }
+          }
+        })
       }
     }
-
-    Source.fromGraph(GraphDSL.create(flow) {
-      implicit b =>
-        {
-          f =>
-            {
-              import GraphDSL.Implicits._
-
-              val fo2 = b.add(fanOut2Shape)
-              fo2.out0 ~> f ~> fo2.in
-              SourceShape(fo2.out1)
-            }
-        }
-    })
   }
 }
