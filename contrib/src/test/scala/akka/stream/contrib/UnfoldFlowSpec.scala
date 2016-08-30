@@ -4,7 +4,7 @@
 package akka.stream.contrib
 
 import akka.stream.scaladsl._
-import akka.stream.{ KillSwitches, FlowShape }
+import akka.stream.{ FlowShape, KillSwitches, OverflowStrategies }
 import akka.stream.testkit.scaladsl.TestSink
 
 class UnfoldFlowSpecAutoFusingOn extends { val autoFusing = true } with UnfoldFlowSpec
@@ -30,10 +30,30 @@ trait UnfoldFlowSpec extends BaseStreamSpec {
         })
 
         val sink = source.runWith(TestSink.probe)
+
         outputs.foreach { output =>
           sink.request(1)
           sink.expectNext(output)
         }
+        sink.request(1)
+        sink.expectNext(1)
+        sink.expectComplete()
+      }
+
+      "with buffered flow" in {
+
+        def bufferedSource(buffSize: Int) = SourceGen.unfoldFlow(27)(Flow.fromFunction[Int, (Int, Int)] {
+          case 1               => throw done
+          case n if n % 2 == 0 => (n / 2, n)
+          case n               => (n * 3 + 1, n)
+        }.recover {
+          case `done` => (1, 1)
+        }.buffer(buffSize, OverflowStrategies.Backpressure))
+
+        val sink = bufferedSource(10).runWith(TestSink.probe)
+
+        sink.request(outputs.length.toLong)
+        outputs.foreach(sink.expectNext(_))
         sink.request(1)
         sink.expectNext(1)
         sink.expectComplete()

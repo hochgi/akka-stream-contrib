@@ -6,6 +6,8 @@ package akka.stream.contrib
 import akka.stream._
 import akka.stream.scaladsl._
 import akka.stream.stage._
+import com.typesafe.config.ConfigFactory
+import scala.concurrent.duration.Duration
 
 /**
  * Source factory methods are placed here
@@ -25,17 +27,18 @@ object SourceGen {
    */
   def unfoldFlow[S, E, M](seed: S)(flow: Graph[FlowShape[S, (S, E)], M]): Source[E, M] = {
 
-    val fanOut2Stage = fanOut2unfoldingStage[(S, E), S, E](seed, {
-      (handleStateElement, grabIn, completeStage) =>
-        new InHandler {
-          override def onPush() = {
-            val (s, e) = grabIn()
-            handleStateElement(s, e)
-          }
+    val generateUnfoldFlowGraphStageLogic = (shape: FanOutShape2[(S, E), S, E]) => new UnfoldFlowGraphStageLogic[(S, E), S, E](shape, seed) {
+      setHandler(nextElem, new InHandler {
+        override def onPush() = {
+          val (s, e) = grab(nextElem)
+          pending = s
+          push(output, e)
+          pushedToCycle = false
         }
-    })
+      })
+    }
 
-    unfoldFlowGraph(fanOut2Stage, flow)
+    unfoldFlowGraph(new FanOut2unfoldingStage(generateUnfoldFlowGraphStageLogic), flow)
   }
 
   /**
@@ -51,20 +54,23 @@ object SourceGen {
    */
   def unfoldFlowWith[E, S, O, M](seed: S, flow: Graph[FlowShape[S, O], M])(unfoldWith: O => Option[(S, E)]): Source[E, M] = {
 
-    val fanOut2Stage = fanOut2unfoldingStage[O, S, E](seed, {
-      (handleStateElement, grabIn, completeStage) =>
-        new InHandler {
-          override def onPush() = {
-            val o = grabIn()
-            unfoldWith(o) match {
-              case None         => completeStage()
-              case Some((s, e)) => handleStateElement(s, e)
+    val generateUnfoldFlowGraphStageLogic = (shape: FanOutShape2[O, S, E]) => new UnfoldFlowGraphStageLogic[O, S, E](shape, seed) {
+      setHandler(nextElem, new InHandler {
+        override def onPush() = {
+          val o = grab(nextElem)
+          unfoldWith(o) match {
+            case None => completeStage()
+            case Some((s, e)) => {
+              pending = s
+              push(output, e)
+              pushedToCycle = false
             }
           }
         }
-    })
+      })
+    }
 
-    unfoldFlowGraph(fanOut2Stage, flow)
+    unfoldFlowGraph(new FanOut2unfoldingStage(generateUnfoldFlowGraphStageLogic), flow)
   }
 
   private[akka] def unfoldFlowGraph[E, S, O, M](
@@ -84,49 +90,52 @@ object SourceGen {
       }
   })
 
-  private[akka] def fanOut2unfoldingStage[O, S, E](seed: S, withInHandler: ((S, E) => Unit, () => O, () => Unit) => InHandler) = new GraphStage[FanOutShape2[O, S, E]] {
+  private[akka] abstract class UnfoldFlowGraphStageLogic[O, S, E] private[stream] (shape: FanOutShape2[O, S, E], seed: S) extends GraphStageLogic(shape) {
 
-    override val shape = new FanOutShape2[O, S, E]("unfoldFlow")
+    lazy val timeout = Duration.fromNanos(ConfigFactory.load().getDuration("akka.stream.contrib.unfold-flow-timeout").toNanos)
     val feedback = shape.out0
     val output = shape.out1
     val nextElem = shape.in
 
-    override def createLogic(attributes: Attributes) = {
+    var pending: S = seed
+    var pushedToCycle = false
 
-      new GraphStageLogic(shape) {
+    setHandler(feedback, new OutHandler {
+      override def onPull() = if (!pushedToCycle && isAvailable(output)) {
+        push(feedback, pending)
+        pending = null.asInstanceOf[S]
+        pushedToCycle = true
+      }
 
-        var pending: S = seed
-        var pushedToCycle = false
-
-        setHandler(nextElem, withInHandler((s, e) => {
-          pending = s
-          push(output, e)
-          pushedToCycle = false
-        }, () => grab(nextElem), completeStage))
-
-        setHandler(feedback, new OutHandler {
-          override def onPull() = if (!pushedToCycle && isAvailable(output)) {
-            push(feedback, pending)
-            pending = null.asInstanceOf[S]
-            pushedToCycle = true
-          }
-
-          override def onDownstreamFinish() = {
-            //Do Nothing, intercept completion as downstream
-          }
-        })
-
-        setHandler(output, new OutHandler {
-          override def onPull() = {
-            pull(nextElem)
-            if (!pushedToCycle && isAvailable(feedback)) {
-              push(feedback, pending)
-              pending = null.asInstanceOf[S]
-              pushedToCycle = true
-            }
+      override def onDownstreamFinish() = {
+        // Do Nothing until `timeout` to try and intercept completion as downstream,
+        // but cancel stream after timeout if inlet is not closed to prevent deadlock.
+        materializer.scheduleOnce(timeout, new Runnable {
+          override def run() = {
+            getAsyncCallback[Unit] { _ =>
+              if (!isClosed(nextElem)) {
+                failStage(new IllegalStateException(s"unfoldFlow source's inner flow canceled only upstream, while downstream remain available for $timeout"))
+              }
+            }.invoke(())
           }
         })
       }
-    }
+    })
+
+    setHandler(output, new OutHandler {
+      override def onPull() = {
+        pull(nextElem)
+        if (!pushedToCycle && isAvailable(feedback)) {
+          push(feedback, pending)
+          pending = null.asInstanceOf[S]
+          pushedToCycle = true
+        }
+      }
+    })
+  }
+
+  private[akka] class FanOut2unfoldingStage[O, S, E] private[stream] (generateGraphStageLogic: FanOutShape2[O, S, E] => UnfoldFlowGraphStageLogic[O, S, E]) extends GraphStage[FanOutShape2[O, S, E]] {
+    override val shape = new FanOutShape2[O, S, E]("unfoldFlow")
+    override def createLogic(attributes: Attributes) = generateGraphStageLogic(shape)
   }
 }
