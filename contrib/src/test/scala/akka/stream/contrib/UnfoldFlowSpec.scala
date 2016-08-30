@@ -74,6 +74,15 @@ trait UnfoldFlowSpec extends BaseStreamSpec {
             sink.expectError(kill)
           }
 
+          "fail when inner stream is canceled and pulled before completion" in {
+            val (killSwitch, sink) = source.toMat(TestSink.probe)(Keep.both).run()
+            val kill = new Exception("KILL!")
+            sink.ensureSubscription()
+            killSwitch.abort(kill)
+            sink.request(1)
+            sink.expectError(kill)
+          }
+
           "fail after 3 elements when aborted" in {
             val (killSwitch, sink) = source.toMat(TestSink.probe)(Keep.both).run()
             val kill = new Exception("KILL!")
