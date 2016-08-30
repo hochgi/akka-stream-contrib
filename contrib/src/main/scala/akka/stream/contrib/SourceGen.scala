@@ -38,6 +38,9 @@ object SourceGen {
     unfoldFlowGraph(fanOut2Stage, flow)
   }
 
+  def unfoldFlow2[S, E, M](seed: S)(flow: Graph[FlowShape[S, (S, E)], M]): Source[E, M] =
+    unfoldFlowWith(seed, flow)(Option.apply)
+
   /**
    * Create a `Source` that will unfold a value of type `S` by
    * passing it through a flow. The flow should emit an output
