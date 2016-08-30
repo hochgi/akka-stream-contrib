@@ -17,6 +17,11 @@ object SourceGen {
    * passing it through a flow. The flow should emit a
    * pair of the next state `S` and output elements of type `E`.
    * Source completes when the flow completes.
+   *
+   * IMPORTANT CAVEAT:
+   * The given flow must not change the number of elements passing through it (i.e. it should output
+   * exactly one element for every received element). Ignoring this, will have an unpredicted result,
+   * and may result in a deadlock.
    */
   def unfoldFlow[S, E, M](seed: S)(flow: Graph[FlowShape[S, (S, E)], M]): Source[E, M] = {
 
@@ -38,6 +43,11 @@ object SourceGen {
    * passing it through a flow. The flow should emit an output
    * value of type `O`, that when fed to the unfolding function,
    * generates a pair of the next state `S` and output elements of type `E`.
+   *
+   * IMPORTANT CAVEAT:
+   * The given flow must not change the number of elements passing through it (i.e. it should output
+   * exactly one element for every received element). Ignoring this, will have an unpredicted result,
+   * and may result in a deadlock.
    */
   def unfoldFlowWith[E, S, O, M](seed: S, flow: Graph[FlowShape[S, O], M])(unfoldWith: O => Option[(S, E)]): Source[E, M] = {
 
@@ -77,24 +87,26 @@ object SourceGen {
   private[akka] def fanOut2unfoldingStage[O, S, E](seed: S, withInHandler: ((S, E) => Unit, () => O, () => Unit) => InHandler) = new GraphStage[FanOutShape2[O, S, E]] {
 
     override val shape = new FanOutShape2[O, S, E]("unfoldFlow")
+    val feedback = shape.out0
+    val output = shape.out1
+    val nextElem = shape.in
+
     override def createLogic(attributes: Attributes) = {
 
       new GraphStageLogic(shape) {
 
-        import shape._
-
         var pending: S = seed
         var pushedToCycle = false
 
-        setHandler(in, withInHandler((s, e) => {
+        setHandler(nextElem, withInHandler((s, e) => {
           pending = s
-          push(out1, e)
+          push(output, e)
           pushedToCycle = false
-        }, () => grab(in), completeStage))
+        }, () => grab(nextElem), completeStage))
 
-        setHandler(out0, new OutHandler {
-          override def onPull() = if (!pushedToCycle && isAvailable(out1)) {
-            push(out0, pending)
+        setHandler(feedback, new OutHandler {
+          override def onPull() = if (!pushedToCycle && isAvailable(output)) {
+            push(feedback, pending)
             pending = null.asInstanceOf[S]
             pushedToCycle = true
           }
@@ -104,11 +116,11 @@ object SourceGen {
           }
         })
 
-        setHandler(out1, new OutHandler {
+        setHandler(output, new OutHandler {
           override def onPull() = {
-            pull(in)
-            if (!pushedToCycle && isAvailable(out0)) {
-              push(out0, pending)
+            pull(nextElem)
+            if (!pushedToCycle && isAvailable(feedback)) {
+              push(feedback, pending)
               pending = null.asInstanceOf[S]
               pushedToCycle = true
             }
