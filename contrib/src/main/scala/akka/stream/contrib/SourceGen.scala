@@ -73,6 +73,7 @@ object SourceGen {
     unfoldFlowGraph(new FanOut2unfoldingStage(generateUnfoldFlowGraphStageLogic), flow)
   }
 
+  /** INTERNAL API */
   private[akka] def unfoldFlowGraph[E, S, O, M](
     fanOut2Stage: GraphStage[FanOutShape2[O, S, E]],
     flow:         Graph[FlowShape[S, O], M]
@@ -90,6 +91,7 @@ object SourceGen {
       }
   })
 
+  /** INTERNAL API */
   private[akka] abstract class UnfoldFlowGraphStageLogic[O, S, E] private[stream] (shape: FanOutShape2[O, S, E], seed: S) extends GraphStageLogic(shape) {
 
     lazy val timeout = Duration.fromNanos(ConfigFactory.load().getDuration("akka.stream.contrib.unfold-flow-timeout").toNanos)
@@ -134,6 +136,7 @@ object SourceGen {
     })
   }
 
+  /** INTERNAL API */
   private[akka] class FanOut2unfoldingStage[O, S, E] private[stream] (generateGraphStageLogic: FanOutShape2[O, S, E] => UnfoldFlowGraphStageLogic[O, S, E]) extends GraphStage[FanOutShape2[O, S, E]] {
     override val shape = new FanOutShape2[O, S, E]("unfoldFlow")
     override def createLogic(attributes: Attributes) = generateGraphStageLogic(shape)
